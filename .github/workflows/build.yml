@@ -63,12 +63,11 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: 18
-
       - name: Install Dependencies
         run: |
-          npm install
-          npm install tailwindcss-animate
-
+            npm install next@15.2.4  # Explicitly install patched version
+            npm install
+            npm install tailwindcss-animate
       - name: Run npm audit
         run: npm audit --audit-level=high
 

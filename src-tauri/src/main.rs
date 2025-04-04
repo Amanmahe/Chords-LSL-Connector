@@ -582,7 +582,7 @@ async fn connect_to_ble(device_id: String, app_handle: AppHandle) -> Result<Stri
                 // Linux/Mac: exact match
                 println!("{}",peripheral_id);
 
-                peripheral_id == device_id
+                peripheral_id.to_lowercase().contains(&target_id.to_lowercase())
             };
 
             if is_match {

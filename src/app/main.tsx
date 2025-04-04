@@ -43,7 +43,7 @@ const App = () => {
     try {
       isProcessing.current = true;
       setActiveButton("bluetooth");
-      await core.invoke("scan_bluetooth_devices");
+      await core.invoke("scan_ble_devices");
 
 
     } catch (error) {
@@ -52,7 +52,7 @@ const App = () => {
   };
 
   useEffect(() => {
-    listen('bluetoothDevices', (event) => {
+    listen('bleDevices', (event) => {
       setDevices(event.payload as { name: string; id: string }[]);
 
       console.log(event.payload); // Check if the devices are printed here
@@ -61,7 +61,7 @@ const App = () => {
 
   const connectToDevice = async () => {
     if (!selectedDevice) return;
-    const response = await core.invoke<string>("connect_to_bluetooth", { deviceId: selectedDevice });
+    const response = await core.invoke<string>("connect_to_ble", { deviceId: selectedDevice });
     setStatus(response);
     setDeviceConnected(true);
   };
@@ -69,8 +69,8 @@ const App = () => {
   const disconnectFromDevice = async () => {
     if (!selectedDevice) return;
     try {
-      const response = await core.invoke<string>("disconnect_from_bluetooth", { deviceId: selectedDevice });
-      core.invoke('cleanup_bluetooth')
+      const response = await core.invoke<string>("disconnect_from_ble", { deviceId: selectedDevice });
+      core.invoke('cleanup_ble')
   .then(() => console.log('Bluetooth cleaned up'))
   .catch(err => console.error('Cleanup failed:', err))
       console.log(response);

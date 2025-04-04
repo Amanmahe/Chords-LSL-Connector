@@ -505,248 +505,264 @@ async fn scan_ble_devices(app_handle: AppHandle) -> Result<(), String> {
 }
 #[tauri::command]
 async fn connect_to_ble(device_id: String, app_handle: AppHandle) -> Result<String, String> {
-    println!("[DEBUG] Starting connect_to_ble for device: {}", device_id);
+    println!("[CONNECT] Starting connection to device: {}", device_id);
     close_ble_outlet();
 
-    // Initialize manager
+    // 1. Initialize Bluetooth Manager
     let manager = match Manager::new().await {
         Ok(m) => {
-            println!("[DEBUG] Bluetooth manager created successfully");
+            println!("[MANAGER] Bluetooth manager initialized");
             m
         }
         Err(e) => {
-            println!("[ERROR] Failed to create Bluetooth manager: {}", e);
+            println!("[ERROR] Manager creation failed: {}", e);
             return Err(format!("Bluetooth initialization failed: {}", e));
         }
     };
 
-    // Get adapters
+    // 2. Get Bluetooth Adapters
     let adapters = match manager.adapters().await {
         Ok(a) => {
-            println!("[DEBUG] Found {} Bluetooth adapter(s)", a.len());
+            println!("[ADAPTERS] Found {} adapter(s)", a.len());
             a
         }
         Err(e) => {
             println!("[ERROR] Failed to get adapters: {}", e);
-            return Err(format!("Failed to get Bluetooth adapters: {}", e));
+            return Err(format!("Adapter discovery failed: {}", e));
         }
     };
 
+    // 3. Process each adapter
     for adapter in adapters {
-        println!("[DEBUG] Checking adapter: {:?}", adapter.adapter_info().await);
-
-        // Get peripherals
-        let peripherals = match adapter.peripherals().await {
-            Ok(p) => {
-                println!("[DEBUG] Found {} peripheral(s)", p.len());
-                p
+        let adapter_info = match adapter.adapter_info().await {
+            Ok(info) => {
+                println!("[ADAPTER] Using adapter: {}", info);
+                info
             }
             Err(e) => {
-                println!("[WARN] Failed to get peripherals for adapter: {}", e);
+                println!("[WARN] Failed to get adapter info: {}", e);
                 continue;
             }
         };
 
+        // 4. Windows-specific device ID normalization
+        let target_id = if cfg!(target_os = "windows") {
+            // Convert MAC address to Windows device ID format (remove colons, lowercase)
+            let cleaned = device_id.replace(':', "").to_lowercase();
+            format!("dev_{}", cleaned)
+        } else {
+            device_id.clone()
+        };
+
+        println!("[SEARCH] Looking for device ID: {} (normalized: {})", device_id, target_id);
+
+        // 5. Get list of peripherals
+        let peripherals = match adapter.peripherals().await {
+            Ok(p) => {
+                println!("[PERIPHERALS] Found {} device(s)", p.len());
+                p
+            }
+            Err(e) => {
+                println!("[ERROR] Peripheral discovery failed: {}", e);
+                continue;
+            }
+        };
+
+        // 6. Search for matching peripheral
         for peripheral in peripherals {
             let peripheral_id = peripheral.id().to_string();
-            println!("[DEBUG] Checking peripheral: {}", peripheral_id);
+            println!("[CHECK] Checking peripheral: {}", peripheral_id);
 
-            if peripheral_id == device_id {
-                println!("[DEBUG] Found matching peripheral: {}", peripheral_id);
+            // 7. Platform-specific ID comparison
+            let is_match = if cfg!(target_os = "windows") {
+                // Windows: compare normalized IDs
+                peripheral_id.to_lowercase().contains(&target_id.to_lowercase())
+            } else {
+                // Linux/Mac: exact match
+                peripheral_id == device_id
+            };
 
-                // Windows-specific pairing workaround
+            if is_match {
+                println!("[MATCH] Found matching device!");
+
+                // 8. Windows-specific pairing
                 #[cfg(target_os = "windows")]
                 {
-                    println!("[DEBUG] Running Windows-specific pairing workaround");
+                    println!("[WINDOWS] Attempting pairing...");
                     use std::process::Command;
                     
-                    // First check if device is already paired
-                    let check_paired = Command::new("powershell")
+                    // Try to pair using Windows native tools
+                    let pair_status = Command::new("powershell")
                         .args(&[
                             "-Command",
-                            &format!("Get-PnpDevice -InstanceId 'BTHENUM\\{}' | Where-Object {{ $_.Status -eq 'OK' }}", device_id)
+                            &format!(
+                                "Start-Process ms-settings:bluetooth; \
+                                Start-Sleep -Seconds 2; \
+                                Add-BluetoothDevice -DeviceId {}",
+                                device_id
+                            )
                         ])
-                        .output();
+                        .status();
 
-                    match check_paired {
-                        Ok(output) => {
-                            let output_str = String::from_utf8_lossy(&output.stdout);
-                            if output_str.trim().is_empty() {
-                                println!("[DEBUG] Device not paired, attempting to pair");
-                                let pair_result = Command::new("powershell")
-                                    .args(&[
-                                        "-Command",
-                                        &format!("Start-Process -FilePath 'ms-settings:bluetooth' -Wait; Add-BluetoothDevice -DeviceId {}", device_id)
-                                    ])
-                                    .status();
-
-                                match pair_result {
-                                    Ok(status) => {
-                                        if status.success() {
-                                            println!("[DEBUG] Pairing command executed successfully");
-                                        } else {
-                                            println!("[WARN] Pairing command failed with status: {:?}", status.code());
-                                        }
-                                    }
-                                    Err(e) => println!("[WARN] Failed to execute pairing command: {}", e),
-                                }
-                            } else {
-                                println!("[DEBUG] Device is already paired");
-                            }
+                    match pair_status {
+                        Ok(status) if status.success() => {
+                            println!("[PAIRING] Pairing command succeeded");
                         }
-                        Err(e) => println!("[WARN] Failed to check pairing status: {}", e),
+                        Ok(status) => {
+                            println!("[WARN] Pairing command exited with code: {:?}", status.code());
+                        }
+                        Err(e) => {
+                            println!("[WARN] Pairing command failed: {}", e);
+                        }
                     }
                 }
 
-                println!("[DEBUG] Setting BLE_CONNECTED to true");
+                // 9. Mark as connected and create LSL outlet
+                println!("[STATE] Setting BLE_CONNECTED = true");
                 *BLE_CONNECTED.lock().unwrap() = true;
 
-                println!("[DEBUG] Creating LSL outlet");
+                println!("[LSL] Creating outlet...");
                 if let Err(e) = create_ble_outlet() {
-                    println!("[ERROR] Failed to create LSL outlet: {}", e);
-                    return Err(format!("Failed to create LSL outlet: {}", e));
+                    println!("[ERROR] Outlet creation failed: {}", e);
+                    return Err(format!("LSL initialization failed: {}", e));
                 }
 
-                // Attempt connection with timeout
-                println!("[DEBUG] Attempting to connect to peripheral...");
+                // 10. Connect with timeout (10 seconds)
+                println!("[CONNECT] Attempting connection...");
                 let connect_result = tokio::time::timeout(
                     Duration::from_secs(10),
                     peripheral.connect()
                 ).await;
 
                 match connect_result {
-                    Ok(Ok(_)) => {
-                        println!("[DEBUG] Successfully connected to peripheral");
-                    }
+                    Ok(Ok(_)) => println!("[CONNECT] Connected successfully!"),
                     Ok(Err(e)) => {
                         println!("[ERROR] Connection failed: {}", e);
                         return Err(format!("Connection failed: {}", e));
                     }
                     Err(_) => {
-                        println!("[ERROR] Connection timed out after 10 seconds");
-                        return Err("Connection timed out".to_string());
+                        println!("[ERROR] Connection timed out");
+                        return Err("Connection timed out (10s)".to_string());
                     }
                 }
 
-                // Discover services
-                println!("[DEBUG] Discovering services...");
-                match peripheral.discover_services().await {
-                    Ok(_) => println!("[DEBUG] Services discovered successfully"),
-                    Err(e) => {
-                        println!("[ERROR] Failed to discover services: {}", e);
-                        return Err(format!("Service discovery failed: {}", e));
-                    }
+                // 11. Discover services
+                println!("[SERVICES] Discovering services...");
+                if let Err(e) = peripheral.discover_services().await {
+                    println!("[ERROR] Service discovery failed: {}", e);
+                    return Err(format!("Service discovery failed: {}", e));
                 }
 
+                // 12. Get characteristics
                 let characteristics = peripheral.characteristics();
-                println!("[DEBUG] Found {} characteristics", characteristics.len());
+                println!("[CHAR] Found {} characteristics", characteristics.len());
 
+                // 13. Find required characteristics
                 let data_char = characteristics.iter()
                     .find(|c| c.uuid.to_string() == "beb5483e-36e1-4688-b7f5-ea07361b26a8")
                     .ok_or_else(|| {
                         println!("[ERROR] Data characteristic not found");
-                        "Data characteristic not found".to_string()
+                        "Data characteristic missing".to_string()
                     })?;
 
                 let control_char = characteristics.iter()
                     .find(|c| c.uuid.to_string() == "0000ff01-0000-1000-8000-00805f9b34fb")
                     .ok_or_else(|| {
                         println!("[ERROR] Control characteristic not found");
-                        "Control characteristic not found".to_string()
+                        "Control characteristic missing".to_string()
                     })?;
 
-                println!("[DEBUG] Subscribing to notifications...");
-                match peripheral.subscribe(data_char).await {
-                    Ok(_) => println!("[DEBUG] Subscribed to notifications successfully"),
-                    Err(e) => {
-                        println!("[ERROR] Failed to subscribe: {}", e);
-                        return Err(format!("Subscription failed: {}", e));
-                    }
+                // 14. Subscribe to notifications
+                println!("[SUBSCRIBE] Setting up notifications...");
+                if let Err(e) = peripheral.subscribe(data_char).await {
+                    println!("[ERROR] Subscription failed: {}", e);
+                    return Err(format!("Notification setup failed: {}", e));
                 }
 
-                println!("[DEBUG] Sending start command...");
-                match peripheral.write(control_char, b"start", WriteType::WithResponse).await {
-                    Ok(_) => println!("[DEBUG] Start command sent successfully"),
-                    Err(e) => {
-                        println!("[ERROR] Failed to send start command: {}", e);
-                        return Err(format!("Failed to send start command: {}", e));
-                    }
+                // 15. Send start command
+                println!("[CONTROL] Sending start command...");
+                if let Err(e) = peripheral.write(control_char, b"start", WriteType::WithResponse).await {
+                    println!("[ERROR] Start command failed: {}", e);
+                    return Err(format!("Failed to start device: {}", e));
                 }
 
+                // 16. Set up notification stream
                 let mut notifications = match peripheral.notifications().await {
                     Ok(n) => {
-                        println!("[DEBUG] Notification stream established");
+                        println!("[NOTIFICATIONS] Stream established");
                         n
                     }
                     Err(e) => {
-                        println!("[ERROR] Failed to get notification stream: {}", e);
-                        return Err(format!("Notification stream failed: {}", e));
+                        println!("[ERROR] Notification stream failed: {}", e);
+                        return Err(format!("Notification stream error: {}", e));
                     }
                 };
 
                 let app_handle_clone = app_handle.clone();
 
+                // 17. Spawn processing task
                 tokio::spawn(async move {
-                    println!("[DEBUG] Starting notification processing loop");
+                    println!("[TASK] Starting data processing loop");
+                    let mut sample_count = 0;
+                    let start_time = Instant::now();
+
                     while *BLE_CONNECTED.lock().unwrap() {
                         if let Some(data) = notifications.next().await {
-                            println!("[DEBUG] Received notification ({} bytes)", data.value.len());
-                            
+                            sample_count += 1;
+                            let elapsed = start_time.elapsed().as_secs_f64();
+                            let rate = sample_count as f64 / elapsed;
+
+                            if sample_count % 100 == 0 {
+                                println!("[DATA] Received {} samples ({:.1} Hz)", sample_count, rate);
+                            }
+
                             match data.value.len() {
                                 NEW_PACKET_LEN => {
-                                    println!("[DEBUG] Processing full packet ({} samples)", BLOCK_COUNT);
                                     for chunk in data.value.chunks_exact(SINGLE_SAMPLE_LEN) {
-                                        match process_ble_sample(chunk) {
-                                            Ok(processed) => {
-                                                // Send to LSL
-                                                if let Some(outlet) = &BLE_OUTLET.lock().unwrap().0 {
-                                                    if let Err(e) = outlet.push_sample(&processed) {
-                                                        println!("[WARN] LSL push error: {}", e);
-                                                    }
-                                                }
-                                                // Send to frontend
-                                                let _ = app_handle_clone.emit("bleData", json!(processed));
-                                            }
-                                            Err(e) => println!("[WARN] Sample processing error: {}", e),
-                                        }
-                                    }
-                                },
-                                SINGLE_SAMPLE_LEN => {
-                                    println!("[DEBUG] Processing single sample");
-                                    match process_ble_sample(&data.value) {
-                                        Ok(processed) => {
-                                            // Send to LSL
+                                        if let Ok(sample) = process_ble_sample(chunk) {
+                                            // Push to LSL
                                             if let Some(outlet) = &BLE_OUTLET.lock().unwrap().0 {
-                                                if let Err(e) = outlet.push_sample(&processed) {
-                                                    println!("[WARN] LSL push error: {}", e);
+                                                if let Err(e) = outlet.push_sample(&sample) {
+                                                    println!("[LSL] Push error: {}", e);
                                                 }
                                             }
                                             // Send to frontend
-                                            let _ = app_handle_clone.emit("bleData", json!(processed));
+                                            let _ = app_handle_clone.emit("bleData", json!(sample));
                                         }
-                                        Err(e) => println!("[WARN] Sample processing error: {}", e),
                                     }
-                                },
+                                }
+                                SINGLE_SAMPLE_LEN => {
+                                    if let Ok(sample) = process_ble_sample(&data.value) {
+                                        // Push to LSL
+                                        if let Some(outlet) = &BLE_OUTLET.lock().unwrap().0 {
+                                            if let Err(e) = outlet.push_sample(&sample) {
+                                                println!("[LSL] Push error: {}", e);
+                                            }
+                                        }
+                                        // Send to frontend
+                                        let _ = app_handle_clone.emit("bleData", json!(sample));
+                                    }
+                                }
                                 len => println!("[WARN] Unexpected packet length: {}", len),
                             }
                         } else {
-                            println!("[DEBUG] Notification stream ended");
+                            println!("[TASK] Notification stream ended");
                             break;
                         }
                     }
-                    println!("[DEBUG] Closing BLE outlet (from notification loop)");
+
+                    println!("[TASK] Cleaning up...");
                     close_ble_outlet();
                 });
 
-                return Ok(format!("Successfully connected to BLE device {}", device_id));
+                return Ok(format!("Connected to {}", peripheral_id));
             }
         }
     }
 
-    println!("[ERROR] Failed to find matching peripheral for device ID: {}", device_id);
-    Err("Failed to connect to BLE device".to_string())
+    println!("[ERROR] Device not found after scanning all adapters");
+    Err("Device not found".to_string())
 }
-
 #[tauri::command]
 async fn disconnect_from_ble(device_id: String) -> Result<String, String> {
     let manager = Manager::new().await.map_err(|e| e.to_string())?;

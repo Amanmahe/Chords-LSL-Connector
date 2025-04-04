@@ -549,7 +549,7 @@ async fn connect_to_ble(device_id: String, app_handle: AppHandle) -> Result<Stri
         let target_id = if cfg!(target_os = "windows") {
             // Convert MAC address to Windows device ID format (remove colons, lowercase)
             let cleaned = device_id.replace(':', "").to_lowercase();
-            format!("dev_{}", cleaned)
+            format!("{}", cleaned)
         } else {
             device_id.clone()
         };
@@ -576,9 +576,12 @@ async fn connect_to_ble(device_id: String, app_handle: AppHandle) -> Result<Stri
             // 7. Platform-specific ID comparison
             let is_match = if cfg!(target_os = "windows") {
                 // Windows: compare normalized IDs
+                println!("{}",peripheral_id);
                 peripheral_id.to_lowercase().contains(&target_id.to_lowercase())
             } else {
                 // Linux/Mac: exact match
+                println!("{}",peripheral_id);
+
                 peripheral_id == device_id
             };
 

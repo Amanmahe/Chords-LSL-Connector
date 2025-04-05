@@ -536,7 +536,7 @@ async fn connect_to_ble(device_id: String, app_handle: AppHandle) -> Result<Stri
     for adapter in adapters {
         let adapter_info = match adapter.adapter_info().await {
             Ok(info) => {
-                println!("[ADAPTER] Using adapter: {}", info);
+                println!("[ADAPTER] Adapter info: {}", info);
                 info
             }
             Err(e) => {
@@ -545,21 +545,97 @@ async fn connect_to_ble(device_id: String, app_handle: AppHandle) -> Result<Stri
             }
         };
 
-        // 4. Windows-specific device ID normalization
-        let target_id = if cfg!(target_os = "windows") {
-            // Convert MAC address to Windows device ID format (remove colons, lowercase)
-            let cleaned = device_id.replace(':', "").to_lowercase();
-            format!("{}", cleaned)
-        } else {
-            device_id.clone()
+        // 4. Detect platform/adapter type
+        let (is_windows, is_linux_hci) = {
+            let info_lower = adapter_info.to_lowercase();
+            (
+                info_lower.contains("winrt") || info_lower.contains("windows"),
+                info_lower.contains("hci")
+            )
         };
 
-        println!("[SEARCH] Looking for device ID: {} (normalized: {})", device_id, target_id);
+        println!("[PLATFORM] Detected - Windows: {}, Linux HCI: {}", is_windows, is_linux_hci);
 
-        // 5. Get list of peripherals
+        // 5. Windows-specific pre-pairing
+        if is_windows {
+            println!("[WINDOWS] Starting Windows-specific pairing process...");
+            use std::process::Command;
+            
+            let win_device_id = device_id.replace(":", "");
+            
+            // Check if device is already paired
+            let check_paired = Command::new("powershell")
+                .args(&[
+                    "-Command",
+                    &format!("Get-PnpDevice -InstanceId 'BTHENUM\\DEV_{}' | Where-Object {{ $_.Status -eq 'OK' }}", 
+                        win_device_id)
+                ])
+                .output();
+
+            match check_paired {
+                Ok(output) => {
+                    let output_str = String::from_utf8_lossy(&output.stdout);
+                    if output_str.trim().is_empty() {
+                        println!("[WINDOWS] Device not paired, attempting to pair...");
+                        
+                        // Try modern Windows 10/11 method first
+                        println!("[WINDOWS] Trying modern pairing via ms-settings...");
+                        let _ = Command::new("powershell")
+                            .args(&[
+                                "-Command",
+                                &format!(
+                                    "Start-Process ms-settings:bluetooth; \
+                                    Start-Sleep -Seconds 2; \
+                                    Add-BluetoothDevice -DeviceId {}",
+                                    device_id
+                                )
+                            ])
+                            .status();
+                        
+                        // Then try legacy method
+                        println!("[WINDOWS] Trying legacy pairing via bthprops.cpl...");
+                        let _ = Command::new("powershell")
+                            .args(&[
+                                "-Command",
+                                &format!(
+                                    "Start-Process bthprops.cpl; \
+                                    Start-Sleep -Seconds 2; \
+                                    Add-BluetoothDevice -DeviceId {}",
+                                    device_id
+                                )
+                            ])
+                            .status();
+                        
+                        tokio::time::sleep(Duration::from_secs(5)).await;
+                    }
+                }
+                Err(e) => println!("[WARN] Failed to check pairing status: {}", e),
+            }
+
+            // Refresh device list
+            println!("[WINDOWS] Starting fresh scan...");
+            if let Err(e) = adapter.start_scan(ScanFilter::default()).await {
+                println!("[WARN] Scan failed: {}", e);
+            }
+            tokio::time::sleep(Duration::from_secs(2)).await;
+        }
+
+        // 6. Get list of peripherals
         let peripherals = match adapter.peripherals().await {
             Ok(p) => {
                 println!("[PERIPHERALS] Found {} device(s)", p.len());
+                
+                // Debug print all found devices
+                println!("[DEBUG] Listing all peripherals:");
+                for (i, p) in p.iter().enumerate() {
+                    let props = p.properties().await.unwrap_or_default();
+                    println!("  {}. ID: {}, Connected: {}", 
+                        i + 1, 
+                        p.id(),
+                        p.is_connected().await.unwrap_or(false)
+                    );
+                }
+                
                 p
             }
             Err(e) => {
@@ -568,59 +644,45 @@ async fn connect_to_ble(device_id: String, app_handle: AppHandle) -> Result<Stri
             }
         };
 
-        // 6. Search for matching peripheral
+        // 7. Search for matching peripheral with platform-specific comparison
         for peripheral in peripherals {
             let peripheral_id = peripheral.id().to_string();
-            println!("[CHECK] Checking peripheral: {}", peripheral_id);
+            let peripheral_props = peripheral.properties().await.unwrap_or_default();
+            
+            println!("[CHECK] Checking peripheral: {}", 
+                peripheral_id,
+            );
 
-            // 7. Platform-specific ID comparison
-            let is_match = if cfg!(target_os = "windows") {
-                // Windows: compare normalized IDs
-                println!("{}",peripheral_id);
-                peripheral_id.to_lowercase().contains(&target_id.to_lowercase())
+            let is_match = if is_windows {
+                // Windows-specific comparison
+                let clean_peripheral_id = peripheral_id
+                    .replace("BTHENUM\\", "")
+                    .replace("DEV_", "")
+                    .replace(":", "")
+                    .to_lowercase();
+                let clean_target_id = device_id.replace(":", "").to_lowercase();
+                
+                println!("[COMPARE] Windows: {} contains {}? {}", 
+                    clean_peripheral_id, 
+                    clean_target_id,
+                    clean_peripheral_id.contains(&clean_target_id)
+                );
+                
+                clean_peripheral_id.contains(&clean_target_id)
+            } else if is_linux_hci {
+                // Linux HCI adapter comparison
+                println!("[COMPARE] Linux HCI: {} == {}", peripheral_id, device_id);
+                peripheral_id == device_id
             } else {
-                // Linux/Mac: exact match
-                println!("{}",peripheral_id);
-
-                peripheral_id.to_lowercase().contains(&target_id.to_lowercase())
+                // Default comparison for other platforms
+                println!("[COMPARE] Default: {} == {}", peripheral_id, device_id);
+                peripheral_id == device_id
             };
 
             if is_match {
                 println!("[MATCH] Found matching device!");
 
-                // 8. Windows-specific pairing
-                #[cfg(target_os = "windows")]
-                {
-                    println!("[WINDOWS] Attempting pairing...");
-                    use std::process::Command;
-                    
-                    // Try to pair using Windows native tools
-                    let pair_status = Command::new("powershell")
-                        .args(&[
-                            "-Command",
-                            &format!(
-                                "Start-Process ms-settings:bluetooth; \
-                                Start-Sleep -Seconds 2; \
-                                Add-BluetoothDevice -DeviceId {}",
-                                device_id
-                            )
-                        ])
-                        .status();
-
-                    match pair_status {
-                        Ok(status) if status.success() => {
-                            println!("[PAIRING] Pairing command succeeded");
-                        }
-                        Ok(status) => {
-                            println!("[WARN] Pairing command exited with code: {:?}", status.code());
-                        }
-                        Err(e) => {
-                            println!("[WARN] Pairing command failed: {}", e);
-                        }
-                    }
-                }
-
-                // 9. Mark as connected and create LSL outlet
+                // 8. Mark as connected and create LSL outlet
                 println!("[STATE] Setting BLE_CONNECTED = true");
                 *BLE_CONNECTED.lock().unwrap() = true;
 
@@ -630,7 +692,7 @@ async fn connect_to_ble(device_id: String, app_handle: AppHandle) -> Result<Stri
                     return Err(format!("LSL initialization failed: {}", e));
                 }
 
-                // 10. Connect with timeout (10 seconds)
+                // 9. Connect with timeout (10 seconds)
                 println!("[CONNECT] Attempting connection...");
                 let connect_result = tokio::time::timeout(
                     Duration::from_secs(10),
@@ -649,18 +711,18 @@ async fn connect_to_ble(device_id: String, app_handle: AppHandle) -> Result<Stri
                     }
                 }
 
-                // 11. Discover services
+                // 10. Discover services
                 println!("[SERVICES] Discovering services...");
                 if let Err(e) = peripheral.discover_services().await {
                     println!("[ERROR] Service discovery failed: {}", e);
                     return Err(format!("Service discovery failed: {}", e));
                 }
 
-                // 12. Get characteristics
+                // 11. Get characteristics
                 let characteristics = peripheral.characteristics();
                 println!("[CHAR] Found {} characteristics", characteristics.len());
 
-                // 13. Find required characteristics
+                // 12. Find required characteristics
                 let data_char = characteristics.iter()
                     .find(|c| c.uuid.to_string() == "beb5483e-36e1-4688-b7f5-ea07361b26a8")
                     .ok_or_else(|| {
@@ -675,21 +737,21 @@ async fn connect_to_ble(device_id: String, app_handle: AppHandle) -> Result<Stri
                         "Control characteristic missing".to_string()
                     })?;
 
-                // 14. Subscribe to notifications
+                // 13. Subscribe to notifications
                 println!("[SUBSCRIBE] Setting up notifications...");
                 if let Err(e) = peripheral.subscribe(data_char).await {
                     println!("[ERROR] Subscription failed: {}", e);
                     return Err(format!("Notification setup failed: {}", e));
                 }
 
-                // 15. Send start command
+                // 14. Send start command
                 println!("[CONTROL] Sending start command...");
                 if let Err(e) = peripheral.write(control_char, b"start", WriteType::WithResponse).await {
                     println!("[ERROR] Start command failed: {}", e);
                     return Err(format!("Failed to start device: {}", e));
                 }
 
-                // 16. Set up notification stream
+                // 15. Set up notification stream
                 let mut notifications = match peripheral.notifications().await {
                     Ok(n) => {
                         println!("[NOTIFICATIONS] Stream established");
@@ -703,7 +765,7 @@ async fn connect_to_ble(device_id: String, app_handle: AppHandle) -> Result<Stri
 
                 let app_handle_clone = app_handle.clone();
 
-                // 17. Spawn processing task
+                // 16. Spawn processing task
                 tokio::spawn(async move {
                     println!("[TASK] Starting data processing loop");
                     let mut sample_count = 0;

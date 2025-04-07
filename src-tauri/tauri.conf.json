@@ -10,13 +10,20 @@
     "beforeBuildCommand": "npm run build"
   },
   "app": {
+
     "windows": [
       {
         "title": "Chords LSL Connector",
         "width": 500,
-        "height": 200,
-        "resizable": true,
-        "fullscreen": false
+        "height": 500,
+        "transparent": true,
+        "resizable": false, 
+        "fullscreen": false,
+        "decorations": false,
+        "visible": true,
+        "closable": true,
+        "minimizable": true,
+        "alwaysOnTop": false
       }
     ],
     "security": {
@@ -26,10 +33,10 @@
   "bundle": {
     "active": true,
     "targets": [
-      "deb",   
-      "msi",    
-      "dmg",   
-      "rpm"   
+      "deb",
+      "msi",
+      "dmg",
+      "rpm"
     ],
     "icon": [
       "icons/chords-logo.png",

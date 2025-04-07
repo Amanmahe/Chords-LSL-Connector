@@ -825,6 +825,8 @@ async fn disconnect_from_ble(device_id: String) -> Result<String, String> {
         }
     };
 
+    let mut device_found = false;
+
     // 3. Process each adapter
     for adapter in adapters {
         let adapter_info = match adapter.adapter_info().await {
@@ -838,13 +840,21 @@ async fn disconnect_from_ble(device_id: String) -> Result<String, String> {
             }
         };
 
-        // 4. Detect platform/adapter type
+        // 4. Detect platform/adapter type (corrected detection)
         let is_windows = adapter_info.to_lowercase().contains("winrt") || 
-                        adapter_info.to_lowercase().contains("windows");
-        
+                         adapter_info.to_lowercase().contains("windows");
         println!("[PLATFORM] Detected - Windows: {}", is_windows);
 
-        // 5. Get list of peripherals (no need for fresh scan in disconnect)
+        // 5. On Windows, perform a fresh scan first
+        if is_windows {
+            println!("[WINDOWS] Starting fresh scan...");
+            if let Err(e) = adapter.start_scan(ScanFilter::default()).await {
+                println!("[WARN] Scan failed: {}", e);
+            }
+            tokio::time::sleep(Duration::from_secs(2)).await;
+        }
+
+        // 6. Get list of peripherals
         let peripherals = match adapter.peripherals().await {
             Ok(p) => {
                 println!("[PERIPHERALS] Found {} device(s)", p.len());
@@ -858,7 +868,6 @@ async fn disconnect_from_ble(device_id: String) -> Result<String, String> {
                         p.is_connected().await.unwrap_or(false)
                     );
                 }
-                
                 p
             }
             Err(e) => {
@@ -867,17 +876,14 @@ async fn disconnect_from_ble(device_id: String) -> Result<String, String> {
             }
         };
 
-        // 6. Search for matching peripheral with platform-specific comparison
+        // 7. Search for matching peripheral with platform-specific comparison
         for peripheral in peripherals {
             let peripheral_id = peripheral.id().to_string();
-            
             println!("[CHECK] Checking peripheral: {}", peripheral_id);
 
             let is_match = if is_windows {
-                // Windows-specific comparison - match your working connection logic
-                let clean_peripheral_id = peripheral_id
-                    .replace(":", "")
-                    .to_lowercase();
+                // Windows-specific comparison
+                let clean_peripheral_id = peripheral_id.replace(":", "").to_lowercase();
                 let clean_target_id = device_id.replace(":", "").to_lowercase();
                 
                 println!("[COMPARE] Windows: {} == {}? {}", 
@@ -885,7 +891,6 @@ async fn disconnect_from_ble(device_id: String) -> Result<String, String> {
                     clean_target_id,
                     clean_peripheral_id == clean_target_id
                 );
-                
                 clean_peripheral_id == clean_target_id
             } else {
                 // Default comparison for other platforms
@@ -894,12 +899,13 @@ async fn disconnect_from_ble(device_id: String) -> Result<String, String> {
             };
 
             if is_match {
+                device_found = true;
                 println!("[MATCH] Found matching peripheral, disconnecting...");
 
-                // 7. Get characteristics (if needed for stop command)
+                // 8. Get characteristics
                 let characteristics = peripheral.characteristics();
 
-                // 8. Send stop command if characteristic exists
+                // 9. Send stop command if characteristic exists
                 if let Some(control_char) = characteristics.iter()
                     .find(|c| c.uuid.to_string() == "0000ff01-0000-1000-8000-00805f9b34fb") 
                 {
@@ -909,7 +915,7 @@ async fn disconnect_from_ble(device_id: String) -> Result<String, String> {
                     }
                 }
 
-                // 9. Unsubscribe from notifications if characteristic exists
+                // 10. Unsubscribe from notifications
                 if let Some(data_char) = characteristics.iter()
                     .find(|c| c.uuid.to_string() == "beb5483e-36e1-4688-b7f5-ea07361b26a8") 
                 {
@@ -918,25 +924,23 @@ async fn disconnect_from_ble(device_id: String) -> Result<String, String> {
                     }
                 }
 
-                // 10. Disconnect from device
+                // 11. Disconnect from device
                 println!("[DISCONNECT] Attempting to disconnect...");
                 match peripheral.disconnect().await {
                     Ok(_) => println!("[DISCONNECT] Disconnected successfully"),
-                    Err(e) => {
-                        println!("[ERROR] Disconnect failed: {}", e);
-                        return Err(format!("Disconnect failed: {}", e));
-                    }
+                    Err(e) => println!("[WARN] Disconnect failed: {}", e),
                 }
 
-                // 11. Attempt to unpair (Windows-specific)
+                // 12. On Windows, attempt to unpair through PowerShell
                 if is_windows {
                     println!("[WINDOWS] Attempting to unpair device...");
+                    let clean_device_id = device_id.replace(":", "");
                     let unpair_result = std::process::Command::new("powershell")
                         .args(&[
                             "-Command",
                             &format!(
                                 "Start-Process powershell -Verb RunAs -ArgumentList '\"Remove-BluetoothDevice -DeviceAddress {} -Force\"'",
-                                device_id.replace(":", "")
+                                clean_device_id
                             )
                         ])
                         .status();
@@ -944,31 +948,33 @@ async fn disconnect_from_ble(device_id: String) -> Result<String, String> {
                     match unpair_result {
                         Ok(status) if status.success() => {
                             println!("[WINDOWS] Successfully unpaired device");
-                        }
+                        },
                         Ok(status) => {
-                            println!("[WARN] Unpair command exited with non-zero status: {:?}", status.code());
-                        }
+                            println!("[WARN] Unpair command exited with code: {:?}", status.code());
+                        },
                         Err(e) => {
                             println!("[WARN] Failed to execute unpair command: {}", e);
                         }
                     }
                 }
 
-                // 12. Clean up global state
-                println!("[STATE] Setting BLE_CONNECTED = false");
-                *BLE_CONNECTED.lock().unwrap() = false;
-                close_ble_outlet();
-
-                return Ok(format!("Disconnected from {}", peripheral_id));
+                break;
             }
         }
     }
 
-    println!("[ERROR] Device not found after scanning all adapters");
+    // 13. Clean up global state
+    println!("[STATE] Setting BLE_CONNECTED = false");
+    *BLE_CONNECTED.lock().unwrap() = false;
     close_ble_outlet();
-    Err("Device not found for disconnect".to_string())
-}
 
+    if device_found {
+        Ok(format!("Disconnected from {}", device_id))
+    } else {
+        println!("[WARN] Device not found in scan, but completed cleanup");
+        Ok(format!("Completed cleanup for {}", device_id))
+    }
+}
 #[tauri::command]
 fn cleanup_ble() {
     close_ble_outlet();

@@ -1,33 +1,41 @@
 use btleplug::api::WriteType;
 use btleplug::platform::Peripheral;
 use futures::future::ok;
-use futures::StreamExt; // Changed from futures_util to futures
+use futures::StreamExt;
 use lazy_static::lazy_static;
-use lsl::Pushable; // Add the necessary imports
+use lsl::Pushable;
 use lsl::StreamOutlet;
 use lsl::{ChannelFormat, StreamInfo};
-use serde_json::json; // Add this import at the top
+use serde_json::json;
 use serialport;
 use std::io::{self, Read, Write};
 use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
-use tauri::{self, AppHandle, Emitter}; // Import Emitter along with AppHandle
+use tauri::{self, AppHandle, Emitter};
 use tokio::sync::mpsc;
 use tungstenite::connect;
 use tungstenite::protocol::Message;
 use url::Url;
-lazy_static! {
-    static ref BAUDRATE: Arc<Mutex<u32>> = Arc::new(Mutex::new(230400)); // Default baud rate
-    static ref PACKET_SIZE: Arc<Mutex<usize>> = Arc::new(Mutex::new(16)); // Default baud rate
-    static ref CHANNELS: Arc<Mutex<usize>> = Arc::new(Mutex::new(6)); // Default baud rate
-    static ref BITS: Arc<Mutex<String>> = Arc::new(Mutex::new("10".into())); // Default baud rate
 
-    static ref SAMPLE_RATE: Arc<Mutex<f64>> = Arc::new(Mutex::new(500.0)); // Default baud rate
+lazy_static! {
+    static ref BAUDRATE: Arc<Mutex<u32>> = Arc::new(Mutex::new(230400));
+    static ref PACKET_SIZE: Arc<Mutex<usize>> = Arc::new(Mutex::new(16));
+    static ref CHANNELS: Arc<Mutex<usize>> = Arc::new(Mutex::new(6));
+    static ref BITS: Arc<Mutex<String>> = Arc::new(Mutex::new("10".into()));
+    static ref SAMPLE_RATE: Arc<Mutex<f64>> = Arc::new(Mutex::new(500.0));
+
+    // Dynamic BLE config derived from device name
+    static ref BLE_CHANNELS: Arc<Mutex<usize>> = Arc::new(Mutex::new(3));
+    static ref BLE_SAMPLE_LEN: Arc<Mutex<usize>> = Arc::new(Mutex::new(7));
+    static ref BLE_OLD_FIRMWARE: Arc<Mutex<bool>> = Arc::new(Mutex::new(false));
 }
+
 use std::collections::VecDeque;
 use tauri::Manager;
+
+// ─── Serial / Arduino detection ──────────────────────────────────────────────
 
 #[tauri::command]
 async fn detect_arduino() -> Result<String, String> {
@@ -36,7 +44,6 @@ async fn detect_arduino() -> Result<String, String> {
         .map_err(|e| format!("Task panicked: {:?}", e))?
 }
 
-// Your original function renamed to detect_arduino_internal
 fn detect_arduino_internal() -> Result<String, String> {
     loop {
         let ports = serialport::available_ports().expect("No ports found!");
@@ -52,9 +59,8 @@ fn detect_arduino_internal() -> Result<String, String> {
                 continue;
             }
             if let serialport::SerialPortType::UsbPort(info) = port_info.port_type {
-                // Check if the VID matches your Arduino device
                 if info.vid == 6790 || matches!(info.pid, 67 | 579 | 29987 | 66 | 24577) {
-                    *BAUDRATE.lock().unwrap() = 115200; // Change the baud rate dynamically
+                    *BAUDRATE.lock().unwrap() = 115200;
                     *SAMPLE_RATE.lock().unwrap() = 250.0;
                 }
             }
@@ -64,7 +70,7 @@ fn detect_arduino_internal() -> Result<String, String> {
                 .open()
             {
                 Ok(mut port) => {
-                    thread::sleep(Duration::from_secs(3)); // Allow Arduino to reset
+                    thread::sleep(Duration::from_secs(3));
                     let command = b"WHORU\n";
 
                     if let Err(e) = port.write_all(command) {
@@ -108,41 +114,38 @@ fn detect_arduino_internal() -> Result<String, String> {
                                             *BITS.lock().unwrap() = "10".into();
                                         } else if response.contains("GIGA-R1") {
                                             *BITS.lock().unwrap() = "16".into();
-                                        // Change the bits dynamically
                                         } else if response.contains("RPI-PICO-RP2040")
                                             || response.contains("STM32G4-CORE-BOARD")
                                             || response.contains("STM32F4-BLACK-PILL")
                                             || response.contains("NPG-LITE")
                                         {
                                             *BITS.lock().unwrap() = "12".into();
-                                            // Change the bits dynamically
-                                        }  else if response.contains("UNO-R4") {
+                                        } else if response.contains("UNO-R4") {
                                             *BITS.lock().unwrap() = "14".into();
-                                            // Change the bits dynamically
                                         }
                                         if response.contains("NANO-CLONE")
                                             || response.contains("NANO-CLASSIC")
                                             || response.contains("STM32F4-BLACK-PILL")
                                         {
-                                            *PACKET_SIZE.lock().unwrap() = 20; // Change the baud rate dynamically
-                                            *CHANNELS.lock().unwrap() = 8; // Change the baud rate dynamically
+                                            *PACKET_SIZE.lock().unwrap() = 20;
+                                            *CHANNELS.lock().unwrap() = 8;
                                         }
                                         if response.contains("MEGA-2560-R3")
                                             || response.contains("MEGA-2560-CLONE")
                                             || response.contains("STM32G4-CORE-BOARD")
                                         {
-                                            *PACKET_SIZE.lock().unwrap() = 36; // Change the baud rate dynamically
-                                            *CHANNELS.lock().unwrap() = 16; // Change the baud rate dynamically
+                                            *PACKET_SIZE.lock().unwrap() = 36;
+                                            *CHANNELS.lock().unwrap() = 16;
                                         }
                                         if response.contains("RPI-PICO-RP2040")
                                             || response.contains("NPG-LITE")
                                         {
-                                            *PACKET_SIZE.lock().unwrap() = 10; // Change the baud rate dynamically
-                                            *CHANNELS.lock().unwrap() = 3; // Change the baud rate dynamically
+                                            *PACKET_SIZE.lock().unwrap() = 10;
+                                            *CHANNELS.lock().unwrap() = 3;
                                         }
                                         println!("Valid device found on port: {}", port_name);
                                         drop(port);
-                                        return Ok(port_name); // Return the found port name directly
+                                        return Ok(port_name);
                                     }
                                 }
                             }
@@ -154,7 +157,6 @@ fn detect_arduino_internal() -> Result<String, String> {
                         }
                     }
                     println!("Final response from port {}: {}", port_name, response);
-
                     drop(port);
                 }
                 Err(e) => {
@@ -164,9 +166,11 @@ fn detect_arduino_internal() -> Result<String, String> {
         }
 
         println!("No valid device found, retrying in 5 seconds...");
-        thread::sleep(Duration::from_secs(5)); // Wait before trying again
+        thread::sleep(Duration::from_secs(5));
     }
 }
+
+// ─── Serial streaming ─────────────────────────────────────────────────────────
 
 #[tauri::command]
 async fn start_streaming(port_name: String, app_handle: AppHandle) {
@@ -174,10 +178,8 @@ async fn start_streaming(port_name: String, app_handle: AppHandle) {
     const START_BYTE_2: u8 = 0x7C;
     const END_BYTE: u8 = 0x01;
 
-    // Create a channel for communication
     let (tx, mut rx) = mpsc::channel::<Vec<i16>>(100);
 
-    // Create StreamInfo as before
     let mut info = StreamInfo::new(
         "UDL",
         "Biopotential_Signals",
@@ -187,21 +189,20 @@ async fn start_streaming(port_name: String, app_handle: AppHandle) {
         "Chords",
     )
     .unwrap();
-   
+
     let mut desc = info.desc();
     let mut resinfo = desc.append_child("resinfo");
     resinfo.append_child_value("resolution", &*BITS.lock().unwrap());
 
-    // Print the XML description
     println!("LSL Stream XML Description:");
     match info.to_xml() {
         Ok(xml) => println!("{}", xml),
         Err(e) => println!("Failed to get XML description: {:?}", e),
     }
- // Create StreamOutlet in the same thread
+
     let (tx, rx) = std::sync::mpsc::channel::<Vec<i16>>();
     let outlet = Arc::new(Mutex::new(StreamOutlet::new(&info, 0, 360).unwrap()));
-    // Use spawn_blocking to handle the task in a separate thread
+
     tokio::task::spawn_blocking(move || loop {
         match serialport::new(&port_name, *BAUDRATE.lock().unwrap())
             .timeout(Duration::from_secs(3))
@@ -267,11 +268,11 @@ async fn start_streaming(port_name: String, app_handle: AppHandle) {
 
                             if last_print_time.elapsed() >= Duration::from_secs(1) {
                                 let elapsed = start_time.elapsed().as_secs_f32();
-                                let samples_per_second = format!("{:.2}", sample_count as f32);
+                                let samples_per_second =
+                                    format!("{:.2}", sample_count as f32);
 
                                 let _ = app_handle.emit("connection", "Connected ");
                                 if elapsed > 2.0 {
-                                    // Wait at least 2 seconds
                                     let _ = app_handle.emit("samplerate", samples_per_second);
                                 }
                                 let _ = app_handle.emit("lsl", "uidserial007");
@@ -299,6 +300,7 @@ async fn start_streaming(port_name: String, app_handle: AppHandle) {
         println!("Device disconnected, checking for new devices...");
         thread::sleep(Duration::from_secs(5));
     });
+
     while let Ok(data) = rx.recv() {
         if let Ok(outlet) = outlet.lock() {
             outlet.push_sample(&data).unwrap_or_else(|e| {
@@ -311,6 +313,8 @@ async fn start_streaming(port_name: String, app_handle: AppHandle) {
 fn calculate_rate(data_size: usize, elapsed_time: f64) -> f64 {
     data_size as f64 / elapsed_time
 }
+
+// ─── WiFi streaming ───────────────────────────────────────────────────────────
 
 #[tauri::command]
 async fn start_wifistreaming(app_handle: AppHandle) {
@@ -362,13 +366,11 @@ async fn start_wifistreaming(app_handle: AppHandle) {
 
                         let sps = samples_per_second.floor();
 
-                        // Maintain the circular buffer (add new, remove oldest if over capacity)
                         if buffer.len() == BUFFER_SIZE {
                             buffer.pop_front();
                         }
                         buffer.push_back(sps);
 
-                        // Calculate average
                         let max_sps: f64 = *buffer
                             .iter()
                             .max_by(|a, b| a.partial_cmp(b).unwrap())
@@ -382,7 +384,6 @@ async fn start_wifistreaming(app_handle: AppHandle) {
                             max_sps
                         );
 
-                        // Emit the average instead of raw value
                         let _ = app_handle.emit("samplerate", max_sps);
 
                         packet_size = 0;
@@ -419,7 +420,6 @@ async fn start_wifistreaming(app_handle: AppHandle) {
                         previous_sample_number = Some(sample_number);
                         previous_data = channel_data.clone();
 
-                        // println!("EEG Data: {} {:?}", sample_number, channel_data);
                         if let Err(err) = outlet.push_sample(&channel_data) {
                             eprintln!("Failed to push sample: {}", err);
                         }
@@ -427,14 +427,11 @@ async fn start_wifistreaming(app_handle: AppHandle) {
                         let _ = app_handle.emit("connection", "Connected");
 
                         if sample_count % 100 == 0 {
-                            let elapsed = start_time.elapsed().as_secs_f64();
-                            let rate = sample_count as f64 / elapsed;
-
                             let _ = app_handle.emit("lsl", "uidwifi007");
                         }
                     }
                 }
-                Ok(_) => {} // Ignore other messages
+                Ok(_) => {}
                 Err(e) => {
                     eprintln!("WebSocket error: {:?}", e);
                     break;
@@ -444,32 +441,56 @@ async fn start_wifistreaming(app_handle: AppHandle) {
         }
     });
 }
+
+// ─── BLE ─────────────────────────────────────────────────────────────────────
+
 use btleplug::api::{Central, Manager as _, Peripheral as _, ScanFilter};
 use btleplug::platform::Manager as BtleManager;
 
-// Thread-safe wrapper for StreamOutlet
 struct SafeOutlet(Option<StreamOutlet>);
 unsafe impl Send for SafeOutlet {}
 unsafe impl Sync for SafeOutlet {}
 
-// Constants for BLE communication
-const SINGLE_SAMPLE_LEN: usize = 7;
-const BLOCK_COUNT: usize = 10;
-const NEW_PACKET_LEN: usize = SINGLE_SAMPLE_LEN * BLOCK_COUNT;
-
-// Global state for BLE
 lazy_static! {
     static ref BLE_OUTLET: Arc<Mutex<SafeOutlet>> = Arc::new(Mutex::new(SafeOutlet(None)));
     static ref BLE_SAMPLE_COUNTER: AtomicU8 = AtomicU8::new(0);
     static ref BLE_CONNECTED: Arc<Mutex<bool>> = Arc::new(Mutex::new(false));
+    static ref CONNECTED_PERIPHERAL: Arc<Mutex<Option<Peripheral>>> =
+        Arc::new(Mutex::new(None));
 }
 
-// Create BLE LSL outlet
+/// Derive BLE channel/sample-length config from the advertised device name,
+/// mirroring the JS logic:
+///   "3CH" → 3 ch, 7 bytes/sample, new firmware
+///   "6CH" → 6 ch, 13 bytes/sample, new firmware
+///   else  → 3 ch, 7 bytes/sample, old firmware
+fn apply_ble_device_config(name: &str) {
+    if name.contains("3CH") {
+        *BLE_CHANNELS.lock().unwrap() = 3;
+        *BLE_SAMPLE_LEN.lock().unwrap() = 7; // 1 counter + 3*2
+        *BLE_OLD_FIRMWARE.lock().unwrap() = false;
+        println!("[CONFIG] 3CH device: channels=3, sample_len=7, new firmware");
+    } else if name.contains("6CH") {
+        *BLE_CHANNELS.lock().unwrap() = 6;
+        *BLE_SAMPLE_LEN.lock().unwrap() = 13; // 1 counter + 6*2
+        *BLE_OLD_FIRMWARE.lock().unwrap() = false;
+        println!("[CONFIG] 6CH device: channels=6, sample_len=13, new firmware");
+    } else {
+        *BLE_CHANNELS.lock().unwrap() = 3;
+        *BLE_SAMPLE_LEN.lock().unwrap() = 7;
+        *BLE_OLD_FIRMWARE.lock().unwrap() = true;
+        println!("[CONFIG] Unknown/old device \"{}\": channels=3, sample_len=7, old firmware", name);
+    }
+}
+
+/// Create (or recreate) the LSL outlet using the currently configured channel count.
 fn create_ble_outlet() -> Result<(), String> {
+    let channels = *BLE_CHANNELS.lock().unwrap();
+
     let mut info = StreamInfo::new(
         "NPG-Lite",
         "EXG",
-        3,
+        channels.try_into().unwrap(),
         500.0,
         ChannelFormat::Float32,
         "uidbluetooth007",
@@ -480,51 +501,65 @@ fn create_ble_outlet() -> Result<(), String> {
     let mut resinfo = desc.append_child("resinfo");
     resinfo.append_child_value("resolution", "12");
 
-    // Debug XML
     match info.to_xml() {
         Ok(xml) => println!("✅ Final LSL StreamInfo:\n{}", xml),
         Err(e) => println!("❌ XML error: {}", e),
     }
-    println!("[DEBUG] StreamInfo XML:\n{}", info.to_xml().unwrap());
 
     let outlet = StreamOutlet::new(&info, 0, 360).map_err(|e| e.to_string())?;
     *BLE_OUTLET.lock().unwrap() = SafeOutlet(Some(outlet));
     Ok(())
 }
 
-// Close BLE LSL outlet
 fn close_ble_outlet() {
     *BLE_OUTLET.lock().unwrap() = SafeOutlet(None);
     BLE_SAMPLE_COUNTER.store(0, Ordering::Relaxed);
     *BLE_CONNECTED.lock().unwrap() = false;
 }
 
-// Process BLE samples
+/// Decode one raw BLE sample.
+/// Expected layout: [counter, ch0_hi, ch0_lo, ch1_hi, ch1_lo, …]
+/// Length must equal 1 + channels * 2.
 fn process_ble_sample(sample: &[u8], app_handle: AppHandle) -> Result<Vec<f32>, String> {
-    if sample.len() != SINGLE_SAMPLE_LEN {
-        return Err("Invalid sample length".to_string());
+    let channels = *BLE_CHANNELS.lock().unwrap();
+    let expected_len = 1 + channels * 2;
+
+    if sample.len() != expected_len {
+        return Err(format!(
+            "Invalid sample length: got {}, expected {} ({} channels)",
+            sample.len(),
+            expected_len,
+            channels
+        ));
     }
-    let mut samplelost = 0;
+
+    let mut samplelost = 0u32;
     let sample_counter = sample[0];
     let prev = BLE_SAMPLE_COUNTER.load(Ordering::Relaxed);
-    let expected = prev.wrapping_add(1);
-    if sample_counter != expected {
-        samplelost += 1;
+    let expected_counter = prev.wrapping_add(1);
 
+    if sample_counter != expected_counter {
+        samplelost += 1;
         println!(
             "Sample counter discontinuity: expected {}, got {}",
-            expected, sample_counter
+            expected_counter, sample_counter
         );
     }
     BLE_SAMPLE_COUNTER.store(sample_counter, Ordering::Relaxed);
     let _ = app_handle.emit("samplelost", samplelost);
 
-    Ok(vec![
-        i16::from_be_bytes([sample[1], sample[2]]) as f32,
-        i16::from_be_bytes([sample[3], sample[4]]) as f32,
-        i16::from_be_bytes([sample[5], sample[6]]) as f32,
-    ])
+    let decoded: Vec<f32> = (0..channels)
+        .map(|i| {
+            let hi = sample[1 + i * 2];
+            let lo = sample[2 + i * 2];
+            i16::from_be_bytes([hi, lo]) as f32
+        })
+        .collect();
+
+    Ok(decoded)
 }
+
+// ─── BLE scan ─────────────────────────────────────────────────────────────────
 
 #[tauri::command]
 async fn scan_ble_devices(app_handle: AppHandle) -> Result<(), String> {
@@ -595,51 +630,38 @@ async fn scan_ble_devices(app_handle: AppHandle) -> Result<(), String> {
     Ok(())
 }
 
+// ─── BLE connect ──────────────────────────────────────────────────────────────
+
 #[tauri::command]
 async fn connect_to_ble(device_id: String, app_handle: AppHandle) -> Result<String, String> {
     println!("[CONNECT] Starting connection to device: {}", device_id);
     close_ble_outlet();
+
     const BUFFER_SIZE: usize = 20;
     let mut buffer: VecDeque<f64> = VecDeque::with_capacity(BUFFER_SIZE);
 
-    // 1. Initialize Bluetooth Manager
     let manager = match BtleManager::new().await {
-        Ok(m) => {
-            println!("[MANAGER] Bluetooth manager initialized");
-            m
-        }
+        Ok(m) => { println!("[MANAGER] Bluetooth manager initialized"); m }
         Err(e) => {
             println!("[ERROR] Manager creation failed: {}", e);
             return Err(format!("Bluetooth initialization failed: {}", e));
         }
     };
 
-    // 2. Get Bluetooth Adapters
     let adapters = match manager.adapters().await {
-        Ok(a) => {
-            println!("[ADAPTERS] Found {} adapter(s)", a.len());
-            a
-        }
+        Ok(a) => { println!("[ADAPTERS] Found {} adapter(s)", a.len()); a }
         Err(e) => {
             println!("[ERROR] Failed to get adapters: {}", e);
             return Err(format!("Adapter discovery failed: {}", e));
         }
     };
 
-    // 3. Process each adapter
     for adapter in adapters {
         let adapter_info = match adapter.adapter_info().await {
-            Ok(info) => {
-                println!("[ADAPTER] Adapter info: {}", info);
-                info
-            }
-            Err(e) => {
-                println!("[WARN] Failed to get adapter info: {}", e);
-                continue;
-            }
+            Ok(info) => { println!("[ADAPTER] Adapter info: {}", info); info }
+            Err(e) => { println!("[WARN] Failed to get adapter info: {}", e); continue; }
         };
 
-        // 4. Detect platform/adapter type
         let (is_windows, is_linux_hci) = {
             let info_lower = adapter_info.to_lowercase();
             (
@@ -653,29 +675,27 @@ async fn connect_to_ble(device_id: String, app_handle: AppHandle) -> Result<Stri
             is_windows, is_linux_hci
         );
 
-        // 5. Windows-specific pre-pairing
         if is_windows {
             println!("[WINDOWS] Starting Windows-specific pairing process...");
             use std::process::Command;
-
             let win_device_id = device_id.replace(":", "");
-
-            // Check if device is already paired
-            let check_paired = Command::new("powershell")
+            let _ = Command::new("powershell")
                 .args(&[
                     "-Command",
-                    &format!("Get-PnpDevice -InstanceId 'BTHENUM\\DEV_{}' | Where-Object {{ $_.Status -eq 'OK' }}",
-                        win_device_id)
+                    &format!(
+                        "Get-PnpDevice -InstanceId 'BTHENUM\\DEV_{}' | Where-Object {{ $_.Status -eq 'OK' }}",
+                        win_device_id
+                    ),
                 ])
                 .output();
 
-            // Refresh device list
             println!("[WINDOWS] Starting fresh scan...");
             if let Err(e) = adapter.start_scan(ScanFilter::default()).await {
                 println!("[WARN] Scan failed: {}", e);
             }
             tokio::time::sleep(Duration::from_secs(2)).await;
         }
+
         if !is_windows && !is_linux_hci {
             adapter
                 .start_scan(ScanFilter::default())
@@ -683,15 +703,12 @@ async fn connect_to_ble(device_id: String, app_handle: AppHandle) -> Result<Stri
                 .expect("Failed to start scan");
             tokio::time::sleep(std::time::Duration::from_secs(1)).await;
         }
-        // 6. Get list of peripherals
+
         let peripherals = match adapter.peripherals().await {
             Ok(p) => {
                 println!("[PERIPHERALS] Found {} device(s)", p.len());
-
-                // Debug print all found devices
                 println!("[DEBUG] Listing all peripherals:");
                 for (i, p) in p.iter().enumerate() {
-                    let props = p.properties().await.unwrap_or_default();
                     println!(
                         "  {}. ID: {}, Connected: {}",
                         i + 1,
@@ -699,7 +716,6 @@ async fn connect_to_ble(device_id: String, app_handle: AppHandle) -> Result<Stri
                         p.is_connected().await.unwrap_or(false)
                     );
                 }
-
                 p
             }
             Err(e) => {
@@ -708,36 +724,30 @@ async fn connect_to_ble(device_id: String, app_handle: AppHandle) -> Result<Stri
             }
         };
 
-        // 7. Search for matching peripheral with platform-specific comparison
         for peripheral in peripherals {
             let peripheral_id = peripheral.id().to_string();
             let peripheral_props = peripheral.properties().await.unwrap_or_default();
 
-            println!("[CHECK] Checking peripheral: {}", peripheral_id,);
+            println!("[CHECK] Checking peripheral: {}", peripheral_id);
 
             let is_match = if is_windows {
-                // Windows-specific comparison
                 let clean_peripheral_id = peripheral_id
                     .replace("BTHENUM\\", "")
                     .replace("DEV_", "")
                     .replace(":", "")
                     .to_lowercase();
                 let clean_target_id = device_id.replace(":", "").to_lowercase();
-
                 println!(
                     "[COMPARE] Windows: {} contains {}? {}",
                     clean_peripheral_id,
                     clean_target_id,
                     clean_peripheral_id.contains(&clean_target_id)
                 );
-
                 clean_peripheral_id.contains(&clean_target_id)
             } else if is_linux_hci {
-                // Linux HCI adapter comparison
                 println!("[COMPARE] Linux HCI: {} == {}", peripheral_id, device_id);
                 peripheral_id == device_id
             } else {
-                // Default comparison for other platforms
                 println!("[COMPARE] Default: {} == {}", peripheral_id, device_id);
                 peripheral_id == device_id
             };
@@ -745,18 +755,24 @@ async fn connect_to_ble(device_id: String, app_handle: AppHandle) -> Result<Stri
             if is_match {
                 println!("[MATCH] Found matching device!");
 
-                // 8. Mark as connected and create LSL outlet
+                // ── Determine config from device name ──────────────────────
+                let dev_name = peripheral_props
+                    .as_ref()
+                    .and_then(|p| p.local_name.clone())
+                    .unwrap_or_default();
+
+                apply_ble_device_config(&dev_name);
+                // ──────────────────────────────────────────────────────────
+
                 println!("[STATE] Setting BLE_CONNECTED = true");
                 *BLE_CONNECTED.lock().unwrap() = true;
 
-                println!("[LSL] Creating outlet...");
-
+                println!("[LSL] Creating outlet ({} channels)...", *BLE_CHANNELS.lock().unwrap());
                 if let Err(e) = create_ble_outlet() {
                     println!("[ERROR] Outlet creation failed: {}", e);
                     return Err(format!("LSL initialization failed: {}", e));
                 }
 
-                // 9. Connect with timeout (10 seconds)
                 println!("[CONNECT] Attempting connection...");
                 let connect_result =
                     tokio::time::timeout(Duration::from_secs(10), peripheral.connect()).await;
@@ -773,18 +789,15 @@ async fn connect_to_ble(device_id: String, app_handle: AppHandle) -> Result<Stri
                     }
                 }
 
-                // 10. Discover services
                 println!("[SERVICES] Discovering services...");
                 if let Err(e) = peripheral.discover_services().await {
                     println!("[ERROR] Service discovery failed: {}", e);
                     return Err(format!("Service discovery failed: {}", e));
                 }
 
-                // 11. Get characteristics
                 let characteristics = peripheral.characteristics();
                 println!("[CHAR] Found {} characteristics", characteristics.len());
 
-                // 12. Find required characteristics
                 let data_char = characteristics
                     .iter()
                     .find(|c| c.uuid.to_string() == "beb5483e-36e1-4688-b7f5-ea07361b26a8")
@@ -801,14 +814,12 @@ async fn connect_to_ble(device_id: String, app_handle: AppHandle) -> Result<Stri
                         "Control characteristic missing".to_string()
                     })?;
 
-                // 13. Subscribe to notifications
                 println!("[SUBSCRIBE] Setting up notifications...");
                 if let Err(e) = peripheral.subscribe(data_char).await {
                     println!("[ERROR] Subscription failed: {}", e);
                     return Err(format!("Notification setup failed: {}", e));
                 }
 
-                // 14. Send start command
                 println!("[CONTROL] Sending start command...");
                 if let Err(e) = peripheral
                     .write(control_char, b"start", WriteType::WithResponse)
@@ -818,12 +829,8 @@ async fn connect_to_ble(device_id: String, app_handle: AppHandle) -> Result<Stri
                     return Err(format!("Failed to start device: {}", e));
                 }
 
-                // 15. Set up notification stream
                 let mut notifications = match peripheral.notifications().await {
-                    Ok(n) => {
-                        println!("[NOTIFICATIONS] Stream established");
-                        n
-                    }
+                    Ok(n) => { println!("[NOTIFICATIONS] Stream established"); n }
                     Err(e) => {
                         println!("[ERROR] Notification stream failed: {}", e);
                         return Err(format!("Notification stream error: {}", e));
@@ -832,120 +839,84 @@ async fn connect_to_ble(device_id: String, app_handle: AppHandle) -> Result<Stri
 
                 let app_handle_clone = app_handle.clone();
 
-                // 16. Spawn processing task
-                // Modify the notification processing loop in connect_to_ble:
-
+                // ── Spawn data-processing task ─────────────────────────────
                 tokio::spawn(async move {
                     println!("[TASK] Starting data processing loop");
-                    const EXPECTED_SAMPLE_RATE: f64 = 500.0; // Fixed expected sample rate
-                    const SAMPLES_PER_SECOND: usize = EXPECTED_SAMPLE_RATE as usize;
+
+                    const EXPECTED_SAMPLE_RATE: f64 = 500.0;
                     const BUFFER_SIZE: usize = 20;
 
-                    let mut sample_count = 0;
-                    let mut packet_count = 0;
-                    let mut lost_samples = 0;
+                    let mut sample_count: usize = 0;
+                    let mut lost_samples: usize = 0;
                     let mut last_sample_number: Option<u8> = None;
-                    let start_time = Instant::now();
                     let mut last_print_time = Instant::now();
-                    let mut buffer: VecDeque<f64> = VecDeque::with_capacity(BUFFER_SIZE);
+                    let mut buf: VecDeque<f64> = VecDeque::with_capacity(BUFFER_SIZE);
 
                     while *BLE_CONNECTED.lock().unwrap() {
                         if let Some(data) = notifications.next().await {
-                            packet_count += 1;
+                            // Read dynamic lengths inside the loop so they reflect
+                            // whatever apply_ble_device_config() set.
+                            let single_len = *BLE_SAMPLE_LEN.lock().unwrap();
+                            let block_count = 10;
+                            let new_packet_len = single_len * block_count;
 
-                            match data.value.len() {
-                                NEW_PACKET_LEN => {
-                                    for chunk in data.value.chunks_exact(SINGLE_SAMPLE_LEN) {
-                                        if let Ok(sample) =
-                                            process_ble_sample(chunk, app_handle_clone.clone())
-                                        {
-                                            // Check sample counter continuity
-                                            let current_sample_number = chunk[0];
-                                            if let Some(last) = last_sample_number {
-                                                let expected = last.wrapping_add(1);
-                                                if current_sample_number != expected {
-                                                    lost_samples += current_sample_number
-                                                        .wrapping_sub(expected)
-                                                        as usize;
-                                                    println!(
-                                                        "Lost {} samples",
-                                                        current_sample_number
-                                                            .wrapping_sub(expected)
-                                                    );
-                                                }
-                                            }
-                                            last_sample_number = Some(current_sample_number);
+                            let process_chunk = |chunk: &[u8]| -> Option<(Vec<f32>, u8)> {
+                                let current_num = chunk[0];
+                                match process_ble_sample(chunk, app_handle_clone.clone()) {
+                                    Ok(sample) => Some((sample, current_num)),
+                                    Err(e) => { println!("[SAMPLE] {}", e); None }
+                                }
+                            };
 
-                                            sample_count += 1;
+                            let chunks: Vec<&[u8]> = if data.value.len() == new_packet_len {
+                                data.value.chunks_exact(single_len).collect()
+                            } else if data.value.len() == single_len {
+                                vec![&data.value]
+                            } else {
+                                println!("[WARN] Unexpected packet length: {}", data.value.len());
+                                vec![]
+                            };
 
-                                            // Push to LSL
-                                            if let Some(outlet) = &BLE_OUTLET.lock().unwrap().0 {
-                                                if let Err(e) = outlet.push_sample(&sample) {
-                                                    println!("[LSL] Push error: {}", e);
-                                                }
-                                            }
+                            for chunk in chunks {
+                                if let Some((sample, current_num)) = process_chunk(chunk) {
+                                    // Track lost samples
+                                    if let Some(last) = last_sample_number {
+                                        let expected = last.wrapping_add(1);
+                                        if current_num != expected {
+                                            let gap = current_num.wrapping_sub(expected) as usize;
+                                            lost_samples += gap;
+                                            println!("[LOSS] Lost {} sample(s)", gap);
+                                        }
+                                    }
+                                    last_sample_number = Some(current_num);
+                                    sample_count += 1;
+
+                                    if let Some(outlet) = &BLE_OUTLET.lock().unwrap().0 {
+                                        if let Err(e) = outlet.push_sample(&sample) {
+                                            println!("[LSL] Push error: {}", e);
                                         }
                                     }
                                 }
-                                SINGLE_SAMPLE_LEN => {
-                                    if let Ok(sample) =
-                                        process_ble_sample(&data.value, app_handle_clone.clone())
-                                    {
-                                        // Check sample counter continuity
-                                        let current_sample_number = data.value[0];
-                                        if let Some(last) = last_sample_number {
-                                            let expected = last.wrapping_add(1);
-                                            if current_sample_number != expected {
-                                                lost_samples += current_sample_number
-                                                    .wrapping_sub(expected)
-                                                    as usize;
-                                                println!(
-                                                    "Lost {} samples",
-                                                    current_sample_number.wrapping_sub(expected)
-                                                );
-                                            }
-                                        }
-                                        last_sample_number = Some(current_sample_number);
-
-                                        sample_count += 1;
-
-                                        if let Some(outlet) = &BLE_OUTLET.lock().unwrap().0 {
-                                            if let Err(e) = outlet.push_sample(&sample) {
-                                                println!("[LSL] Push error: {}", e);
-                                            }
-                                        }
-                                    }
-                                }
-                                len => println!("[WARN] Unexpected packet length: {}", len),
                             }
 
-                            // Calculate statistics every second
+                            // Emit stats once per second
                             let elapsed = last_print_time.elapsed().as_secs_f64();
                             if elapsed >= 1.0 {
-                                // Calculate actual sample rate (should be close to 500)
                                 let actual_rate = sample_count as f64 / elapsed;
+                                let expected_samples =
+                                    (EXPECTED_SAMPLE_RATE * elapsed) as usize;
+                                let received_pct = (sample_count as f64
+                                    / expected_samples as f64)
+                                    * 100.0;
 
-                                // Calculate percentage of expected samples received
-                                let expected_samples = (EXPECTED_SAMPLE_RATE * elapsed) as usize;
-                                let received_percentage =
-                                    (sample_count as f64 / expected_samples as f64) * 100.0;
+                                if buf.len() == BUFFER_SIZE { buf.pop_front(); }
+                                buf.push_back(received_pct);
 
-                                // Maintain buffer for smoothing
-                                if buffer.len() == BUFFER_SIZE {
-                                    buffer.pop_front();
-                                }
-                                buffer.push_back(received_percentage);
-
-                                // Calculate average reception percentage
-                                let avg_percentage: f64 =
-                                    buffer.iter().sum::<f64>() / buffer.len() as f64;
-
-                                // Emit quality metrics to frontend
                                 let _ = app_handle_clone.emit("samplerate", actual_rate);
                                 let _ = app_handle_clone.emit("samplelost", lost_samples);
+                                let _ = app_handle_clone.emit("connection", "Connected");
                                 let _ = app_handle_clone.emit("lsl", "uidbluetooth007");
 
-                                // Reset counters
                                 sample_count = 0;
                                 lost_samples = 0;
                                 last_print_time = Instant::now();
@@ -959,7 +930,8 @@ async fn connect_to_ble(device_id: String, app_handle: AppHandle) -> Result<Stri
                     println!("[TASK] Cleaning up...");
                     close_ble_outlet();
                 });
-                return Ok(format!("Connected"));
+
+                return Ok("Connected".to_string());
             }
         }
     }
@@ -968,37 +940,32 @@ async fn connect_to_ble(device_id: String, app_handle: AppHandle) -> Result<Stri
     Err("Device not found".to_string())
 }
 
+// ─── BLE cleanup ─────────────────────────────────────────────────────────────
+
 fn cleanup_resources() {
     println!("[CLEANUP] Performing final cleanup");
     *BLE_CONNECTED.lock().unwrap() = false;
     close_ble_outlet();
 }
+
 #[tauri::command]
 fn cleanup_ble() {
     close_ble_outlet();
 }
-// Add this with your other lazy_static declarations
-lazy_static! {
-    // ... your existing static refs ...
-    static ref CONNECTED_PERIPHERAL: Arc<Mutex<Option<Peripheral>>> = Arc::new(Mutex::new(None));
-}
 
-// Modify the cleanup_on_exit function
 fn cleanup_on_exit() {
     println!("[CLEANUP] Application exiting - cleaning up BLE resources");
-
-    // Disconnect the peripheral if connected
     if let Some(peripheral) = CONNECTED_PERIPHERAL.lock().unwrap().take() {
         println!("[CLEANUP] Disconnecting peripheral...");
         if let Err(e) = futures::executor::block_on(peripheral.disconnect()) {
             println!("[WARN] Failed to disconnect peripheral: {}", e);
         }
     }
-
-    // Cleanup other resources
     cleanup_resources();
 }
-// Modify the main function
+
+// ─── Entry point ──────────────────────────────────────────────────────────────
+
 fn main() {
     tauri::Builder::default()
         .invoke_handler(tauri::generate_handler![
@@ -1010,10 +977,7 @@ fn main() {
             cleanup_ble,
         ])
         .setup(|app| {
-            // Get the main window
             let window = app.get_webview_window("main").unwrap();
-
-            // Register cleanup handler when app exits
             window.on_window_event(move |event| {
                 if let tauri::WindowEvent::Destroyed = event {
                     cleanup_on_exit();

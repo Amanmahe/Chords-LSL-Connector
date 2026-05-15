@@ -13,35 +13,35 @@
     "version:sync": "node scripts/sync-version.cjs"
   },
   "dependencies": {
-    "@fortawesome/free-brands-svg-icons": "^6.7.2",
-    "@fortawesome/react-fontawesome": "^0.2.2",
-    "@tauri-apps/plugin-shell": "^2.2.2",
-    "@types/smoothie": "^1.25.29",
-    "lucide-react": "^0.469.0",
-    "next": "^16.2.3",
-    "react": "^19.0.1",
-    "react-dom": "^19.0.1",
-    "smoothie": "^1.36.1",
-    "tailwindcss-animate": "^1.0.7"
+    "@fortawesome/free-brands-svg-icons": "6.7.2",
+    "@fortawesome/react-fontawesome": "0.2.2",
+    "@tauri-apps/plugin-shell": "2.2.2",
+    "@types/smoothie": "1.25.29",
+    "lucide-react": "0.469.0",
+    "next": "16.2.3",
+    "react": "19.0.1",
+    "react-dom": "19.0.1",
+    "smoothie": "1.36.1",
+    "tailwindcss-animate": "1.0.7"
   },
   "devDependencies": {
-    "@eslint/eslintrc": "^3",
-    "@iarna/toml": "^2.2.5",
-    "@tauri-apps/api": "^2.1.1",
-    "@types/node": "^20.19.27",
-    "@types/react": "^19.0.1",
-    "@types/react-dom": "^19.0.1",
-    "@types/webpack-env": "^1.18.5",
-    "autoprefixer": "^10.4.21",
-    "eslint": "^9",
-    "eslint-config-next": "^16.0.7",
-    "postcss": "^8.5.6",
-    "tailwindcss": "^3.4.17",
-    "ts-node": "^10.9.2",
-    "typescript": "^5.9.3"
+    "@eslint/eslintrc": "3",
+    "@iarna/toml": "2.2.5",
+    "@tauri-apps/api": "2.1.1",
+    "@types/node": "20.19.27",
+    "@types/react": "19.0.1",
+    "@types/react-dom": "19.0.1",
+    "@types/webpack-env": "1.18.5",
+    "autoprefixer": "10.4.21",
+    "eslint": "9",
+    "eslint-config-next": "16.0.7",
+    "postcss": "8.5.6",
+    "tailwindcss": "3.4.17",
+    "ts-node": "10.9.2",
+    "typescript": "5.9.3"
   },
   "overrides": {
-    "glob": "^10.5.0",
-    "js-yaml": "^4.1.1"
+    "glob": "10.5.0",
+    "js-yaml": "4.1.1"
   }
 }

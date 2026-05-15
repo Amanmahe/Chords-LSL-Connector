@@ -11,6 +11,8 @@ target/
 
 # Next.js build outputs
 /.next/
+/.out/
+.out/
 /out/
 .next/
 .next.config.ts.timestamp
@@ -63,6 +65,7 @@ yarn-debug.log*
 yarn-error.log*
 lerna-debug.log*
 *.log
+package-lock.json     
 
 # Runtime data
 pids

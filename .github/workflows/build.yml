@@ -138,12 +138,15 @@ jobs:
             SignedApp/*.app >/dev/null
           codesign --verify --deep --strict --verbose=2 SignedApp/*.app
 
-      - name: Rebuild .dmg with signed .app
+      - name: Rebuild .dmg with signed .app and versioned name
         if: runner.os == 'macOS'
         run: |
-          npm install -g create-dmg
+          version="$(jq -r '.version' version.json)"
           mkdir -p rebuilt-dmg
-          npx create-dmg SignedApp/*.app rebuilt-dmg --overwrite
+          hdiutil create -volname "chords-lsl-connector" \
+            -srcfolder SignedApp \
+            -ov -format UDZO \
+            "rebuilt-dmg/chords-lsl-connector.${version}.dmg"
 
       - name: Notarize macOS App
         if: runner.os == 'macOS'
@@ -189,7 +192,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: tauri-app-linux-rpm
-          path: src-tauri/target/release/bundle/rpm
+          path: src-tauri/target/release/bundle/rpm/*.rpm
 
   release:
     needs: [build, check-version-and-tag]
@@ -215,34 +218,34 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           name: tauri-app-macos
-          path: src-tauri/target/release/bundle/dmg
+          path: release-artifacts/dmg
 
       - name: Download Windows Artifact
         uses: actions/download-artifact@v4
         with:
           name: tauri-app-windows
-          path: src-tauri/target/release/bundle/msi
+          path: release-artifacts/msi
 
       - name: Download Linux Artifact (deb)
         uses: actions/download-artifact@v4
         with:
           name: tauri-app-linux-deb
-          path: src-tauri/target/release/bundle/deb
+          path: release-artifacts/deb
 
       - name: Download Linux Artifact (rpm)
         uses: actions/download-artifact@v4
         with:
           name: tauri-app-linux-rpm
-          path: src-tauri/target/release/bundle/rpm
+          path: release-artifacts/rpm
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v1
         with:
           tag_name: "${{ steps.verified_version.outputs.version }}"
           files: |
-            src-tauri/target/release/bundle/dmg/*.dmg
-            src-tauri/target/release/bundle/msi/*.msi
-            src-tauri/target/release/bundle/deb/*.deb
-            src-tauri/target/release/bundle/rpm/*.rpm
+            release-artifacts/dmg/*.dmg
+            release-artifacts/msi/*.msi
+            release-artifacts/deb/*.deb
+            release-artifacts/rpm/*.rpm
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

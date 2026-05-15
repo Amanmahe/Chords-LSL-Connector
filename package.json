@@ -15,19 +15,13 @@
   "dependencies": {
     "@fortawesome/free-brands-svg-icons": "^6.7.2",
     "@fortawesome/react-fontawesome": "^0.2.2",
-    "@radix-ui/react-slot": "^1.1.1",
     "@tauri-apps/plugin-shell": "^2.2.2",
     "@types/smoothie": "^1.25.29",
-    "class-variance-authority": "^0.7.1",
-    "clsx": "^2.1.1",
-    "lucide": "^0.469.0",
     "lucide-react": "^0.469.0",
-    "next": "^16.0.7",
+    "next": "^16.2.3",
     "react": "^19.0.1",
     "react-dom": "^19.0.1",
-    "recharts": "^2.15.4",
     "smoothie": "^1.36.1",
-    "tailwind-merge": "^2.5.5",
     "tailwindcss-animate": "^1.0.7"
   },
   "devDependencies": {

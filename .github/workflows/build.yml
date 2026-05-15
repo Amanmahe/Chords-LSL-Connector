@@ -62,6 +62,13 @@ jobs:
         with:
           node-version: "20.9.0"
 
+      - name: Get App Version
+        id: get_version
+        run: |
+          version=$(jq -r '.version' version.json)
+          sanitized_version="v${version//./_}"
+          echo "sanitized_version=$sanitized_version" >> "$GITHUB_OUTPUT"
+
       - name: Install Dependencies
         run: |
           npm install
@@ -142,11 +149,13 @@ jobs:
         if: runner.os == 'macOS'
         run: |
           mkdir -p rebuilt-dmg
-          app_name=$(ls SignedApp/*.app | head -n 1 | xargs basename)
-          hdiutil create -volname "${app_name%.app}" \
-            -srcfolder SignedApp \
+          app_name=$(ls SignedApp/ | grep "\.app$" | head -n 1)
+          base_name="${app_name%.app}"
+          sanitized_name="${base_name// /_}"
+          hdiutil create -volname "$base_name" \
+            -srcfolder "SignedApp/$app_name" \
             -ov -format UDZO \
-            "rebuilt-dmg/${app_name%.app}.dmg"
+            "rebuilt-dmg/${sanitized_name}_${{ steps.get_version.outputs.sanitized_version }}_aarch64.dmg"
 
       - name: Notarize macOS App
         if: runner.os == 'macOS'
@@ -165,6 +174,26 @@ jobs:
         run: |
           dmg_path=$(find rebuilt-dmg -name "*.dmg" | head -n 1)
           xcrun stapler staple "$dmg_path" >/dev/null
+
+      - name: Rename Windows Artifact
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $file = Get-ChildItem src-tauri/target/release/bundle/msi/*.msi | Select-Object -First 1
+          $newName = "Chords_LSL_Connector_${{ steps.get_version.outputs.sanitized_version }}_x64.msi"
+          Rename-Item $file.FullName (Join-Path $file.DirectoryName $newName)
+
+      - name: Rename Linux deb Artifact
+        if: runner.os == 'Linux'
+        run: |
+          file=$(find src-tauri/target/release/bundle/deb -name "*.deb" | head -n 1)
+          mv "$file" "src-tauri/target/release/bundle/deb/Chords_LSL_Connector_${{ steps.get_version.outputs.sanitized_version }}_amd64.deb"
+
+      - name: Rename Linux rpm Artifact
+        if: runner.os == 'Linux'
+        run: |
+          file=$(find src-tauri/target/release/bundle/rpm -name "*.rpm" | head -n 1)
+          mv "$file" "src-tauri/target/release/bundle/rpm/Chords_LSL_Connector_${{ steps.get_version.outputs.sanitized_version }}_x86_64.rpm"
 
       - name: Upload Artifact for macOS
         if: runner.os == 'macOS'
@@ -192,7 +221,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: tauri-app-linux-rpm
-          path: src-tauri/target/release/bundle/rpm
+          path: src-tauri/target/release/bundle/rpm/*.rpm
 
   release:
     needs: [build, check-version-and-tag]

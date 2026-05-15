@@ -62,13 +62,6 @@ jobs:
         with:
           node-version: "20.9.0"
 
-      - name: Get App Version
-        id: get_version
-        run: |
-          version=$(jq -r '.version' version.json)
-          sanitized_version="v${version//./_}"
-          echo "sanitized_version=$sanitized_version" >> "$GITHUB_OUTPUT"
-
       - name: Install Dependencies
         run: |
           npm install
@@ -145,17 +138,15 @@ jobs:
             SignedApp/*.app >/dev/null
           codesign --verify --deep --strict --verbose=2 SignedApp/*.app
 
-      - name: Rebuild .dmg with signed .app
+      - name: Rebuild .dmg with signed .app and versioned name
         if: runner.os == 'macOS'
         run: |
+          version="$(jq -r '.version' version.json)"
           mkdir -p rebuilt-dmg
-          app_name=$(ls SignedApp/ | grep "\.app$" | head -n 1)
-          base_name="${app_name%.app}"
-          sanitized_name="${base_name// /_}"
-          hdiutil create -volname "$base_name" \
-            -srcfolder "SignedApp/$app_name" \
+          hdiutil create -volname "chords-lsl-connector" \
+            -srcfolder SignedApp \
             -ov -format UDZO \
-            "rebuilt-dmg/${sanitized_name}_${{ steps.get_version.outputs.sanitized_version }}_aarch64.dmg"
+            "rebuilt-dmg/chords-lsl-connector.${version}.dmg"
 
       - name: Notarize macOS App
         if: runner.os == 'macOS'
@@ -174,26 +165,6 @@ jobs:
         run: |
           dmg_path=$(find rebuilt-dmg -name "*.dmg" | head -n 1)
           xcrun stapler staple "$dmg_path" >/dev/null
-
-      - name: Rename Windows Artifact
-        if: runner.os == 'Windows'
-        shell: pwsh
-        run: |
-          $file = Get-ChildItem src-tauri/target/release/bundle/msi/*.msi | Select-Object -First 1
-          $newName = "Chords_LSL_Connector_${{ steps.get_version.outputs.sanitized_version }}_x64.msi"
-          Rename-Item $file.FullName (Join-Path $file.DirectoryName $newName)
-
-      - name: Rename Linux deb Artifact
-        if: runner.os == 'Linux'
-        run: |
-          file=$(find src-tauri/target/release/bundle/deb -name "*.deb" | head -n 1)
-          mv "$file" "src-tauri/target/release/bundle/deb/Chords_LSL_Connector_${{ steps.get_version.outputs.sanitized_version }}_amd64.deb"
-
-      - name: Rename Linux rpm Artifact
-        if: runner.os == 'Linux'
-        run: |
-          file=$(find src-tauri/target/release/bundle/rpm -name "*.rpm" | head -n 1)
-          mv "$file" "src-tauri/target/release/bundle/rpm/Chords_LSL_Connector_${{ steps.get_version.outputs.sanitized_version }}_x86_64.rpm"
 
       - name: Upload Artifact for macOS
         if: runner.os == 'macOS'
@@ -247,34 +218,34 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           name: tauri-app-macos
-          path: src-tauri/target/release/bundle/dmg
+          path: release-artifacts/dmg
 
       - name: Download Windows Artifact
         uses: actions/download-artifact@v4
         with:
           name: tauri-app-windows
-          path: src-tauri/target/release/bundle/msi
+          path: release-artifacts/msi
 
       - name: Download Linux Artifact (deb)
         uses: actions/download-artifact@v4
         with:
           name: tauri-app-linux-deb
-          path: src-tauri/target/release/bundle/deb
+          path: release-artifacts/deb
 
       - name: Download Linux Artifact (rpm)
         uses: actions/download-artifact@v4
         with:
           name: tauri-app-linux-rpm
-          path: src-tauri/target/release/bundle/rpm
+          path: release-artifacts/rpm
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v1
         with:
           tag_name: "${{ steps.verified_version.outputs.version }}"
           files: |
-            src-tauri/target/release/bundle/dmg/*.dmg
-            src-tauri/target/release/bundle/msi/*.msi
-            src-tauri/target/release/bundle/deb/*.deb
-            src-tauri/target/release/bundle/rpm/*.rpm
+            release-artifacts/dmg/*.dmg
+            release-artifacts/msi/*.msi
+            release-artifacts/deb/*.deb
+            release-artifacts/rpm/*.rpm
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

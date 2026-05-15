@@ -141,9 +141,12 @@ jobs:
       - name: Rebuild .dmg with signed .app
         if: runner.os == 'macOS'
         run: |
-          npm install -g create-dmg
           mkdir -p rebuilt-dmg
-          npx create-dmg SignedApp/*.app rebuilt-dmg --overwrite
+          app_name=$(ls SignedApp/*.app | head -n 1 | xargs basename)
+          hdiutil create -volname "${app_name%.app}" \
+            -srcfolder SignedApp \
+            -ov -format UDZO \
+            "rebuilt-dmg/${app_name%.app}.dmg"
 
       - name: Notarize macOS App
         if: runner.os == 'macOS'

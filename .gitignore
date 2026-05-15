@@ -11,6 +11,8 @@ target/
 
 # Next.js build outputs
 /.next/
+/.out/
+.out/
 /out/
 .next/
 .next.config.ts.timestamp
